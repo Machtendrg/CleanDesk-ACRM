@@ -3,14 +3,20 @@ import pandas as pd
 from datetime import datetime
 import tkinter as tk
 from tkinter.scrolledtext import ScrolledText
-from tkcalendar import DateEntry  # Import DateEntry for calendar widget
+from tkcalendar import DateEntry
 from fpdf import FPDF
-import requests
-import json
 import logging
+import google.generativeai as genai
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Configure Gemini API
+genai.configure(api_key="AIzaSyB6E0q8qe_pwctfbkqjfVo1J4o-dEvbn2k")
+
+
+
 
 def log_to_console(console_output, message):
     """
@@ -26,6 +32,7 @@ def log_to_console(console_output, message):
         console_output.update_idletasks()  # Ensure GUI updates immediately
     else:
         logging.error("Invalid console_output passed to log_to_console.")
+
 
 
 def consolidate_cdnotes(root_directory, output_csv):
@@ -84,34 +91,25 @@ def consolidate_cdnotes(root_directory, output_csv):
         logging.error(f"Error saving the consolidated file: {e}")
 
 
-def query_gemini(endpoint: str, api_key: str, model: str, prompt: str):
+def query_gemini(prompt: str, model: str):
+    model = genai.GenerativeModel("gemini-1.5-flash")
     """
-    Query the Gemini API with a text prompt and return the full response.
+    Query the Gemini API with a text prompt using the google-generativeai library.
 
     Args:
-        endpoint (str): The Gemini API endpoint.
-        api_key (str): Your Gemini API key.
-        model (str): The name of the Gemini model to use.
         prompt (str): The text prompt to send.
+        model (str): The name of the Gemini model to use.
 
     Returns:
         str: The AI response from Gemini.
     """
-    url = f"{endpoint}/v1beta/models/{model}:generateContent"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {"prompt": prompt}
-
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        result = response.json()
-        return result.get("candidates", [{}])[0].get("content", "").strip()
-    except requests.exceptions.RequestException as e:
+        response = genai.GenerativeModel(model).generate_content(prompt)
+        return response.text.strip() if response and response.text else None
+    except Exception as e:
         logging.error(f"Error querying Gemini: {e}")
         return None
+
 
 
 
@@ -204,36 +202,59 @@ def save_csv_report(data, start_date, end_date, console_output, open_file=False)
 
 
 def process_csv_for_pass_fail_and_generate_pdfs(
-    csv_path: str, endpoint: str, model: str, analysis_column: str,
-    output_path: str, pdf_output_dir: str, console_output, generate_pdfs, api_key: str
+    csv_path: str, output_path: str, pdf_output_dir: str, console_output, generate_pdfs, gemini_model, api_key
 ):
+
+    """
+    Process the CSV for pass/fail determination using Gemini API and optionally generate PDFs for failed records.
+
+    Args:
+        csv_path (str): Path to the input CSV.
+        output_path (str): Path to save the processed output CSV.
+        pdf_output_dir (str): Directory to save generated PDFs.
+        console_output: Console widget for logging.
+        generate_pdfs (bool): Whether to generate PDFs for failed records.
+    """
+    # Import and configure Gemini API
+    import google.generativeai as genai
+    genai.configure(api_key="AIzaSyB6E0q8qe_pwctfbkqjfVo1J4o-dEvbn2k")
 
     data = pd.read_csv(csv_path)
 
     logging.info(f"Available columns in the CSV: {list(data.columns)}")
     log_to_console(console_output, f"Available columns in the CSV: {list(data.columns)}")
 
-    if analysis_column not in data.columns:
-        raise KeyError(f"The specified column '{analysis_column}' does not exist in the CSV.")
+    if "Note" not in data.columns:
+        raise KeyError(f"The specified column 'Note' does not exist in the CSV.")
 
-    if "AI_P_F" not in data.columns:
-        data["AI_P_F"] = ""
+    # Ensure required columns exist
     if "AI_Response" not in data.columns:
         data["AI_Response"] = ""
+    if "Compliant" not in data.columns:
+        data["Compliant"] = ""
 
     log_to_console(console_output, f"Processing {len(data)} records...")
 
     for index, row in data.iterrows():
-        record = row[analysis_column]
+        record = row["Note"]
         prompt = (
             f"This is a strict Clean Desk report. Anything found on the desk is considered a fail, except when "
             f"the desk is explicitly described as 'Desk clean - meets compliance', which should be marked as a pass. "
             f"Determine if the following record is a 'Pass' or 'Fail': {record}"
         )
+        time.sleep(5)
         logging.info(f"Querying Gemini for row {index + 1}: {prompt}")
         log_to_console(console_output, f"Querying Gemini for record {index + 1} out of {len(data)}...")
 
-        ai_response = query_gemini(endpoint, api_key, model, prompt)
+        try:
+            # Query the Gemini API
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            response = model.generate_content(prompt)
+            ai_response = response.text.strip() if response and response.text else None
+        except Exception as e:
+            logging.error(f"Error querying Gemini: {e}")
+            ai_response = None
+
         if ai_response:
             if "pass" in ai_response.lower():
                 pass_fail = "PASSED"
@@ -245,7 +266,7 @@ def process_csv_for_pass_fail_and_generate_pdfs(
                 pass_fail = "UNKNOWN"
                 compliant = "UNKNOWN"
 
-            data.at[index, "AI_Response"] = ai_response.strip()
+            data.at[index, "AI_Response"] = ai_response
             data.at[index, "AI_P_F"] = pass_fail
             data.at[index, "Compliant"] = compliant
 
@@ -253,7 +274,7 @@ def process_csv_for_pass_fail_and_generate_pdfs(
                 employee_name = row.get("Employee Name", "Unknown")
                 record_date = row.get("Record Date", "Unknown")
                 notes = row.get("Note", "No Notes")
-                generate_pdf(employee_name, record_date, notes, ai_response.strip(), pdf_output_dir)
+                generate_pdf(employee_name, record_date, notes, ai_response, pdf_output_dir)
 
             log_to_console(console_output, f"Response for record {index + 1}: {ai_response} (Determined: {pass_fail})")
         else:
@@ -262,42 +283,18 @@ def process_csv_for_pass_fail_and_generate_pdfs(
             data.at[index, "Compliant"] = "UNKNOWN"
             log_to_console(console_output, f"No valid response for record {index + 1}")
 
-    data.rename(columns={"Record Date": "Last Clean Desk Date"}, inplace=True)
+    # Rename "Record Date" to "Last Clean Desk Date"
+    if "Record Date" in data.columns:
+        data.rename(columns={"Record Date": "Last Clean Desk Date"}, inplace=True)
 
+    # Ensure required columns and reorder
     required_columns = [
         "Employee Name", "Last Clean Desk Date", "Location", "Compliant", "Note", "AI_Response"
     ]
     for column in required_columns:
         if column not in data.columns:
-            data[column] = "Unknown"
-
-    data = data[required_columns]
-
-    try:
-        data.to_csv(output_path, index=False)
-        logging.info(f"Results saved to {output_path}")
-        log_to_console(console_output, f"Results saved to {output_path}")
-    except Exception as e:
-        log_to_console(console_output, f"Error saving the file: {e}")
-
-    # Rename "Record Date" to "Last Clean Desk Date"
-    if "Record Date" in data.columns:
-        data.rename(columns={"Record Date": "Last Clean Desk Date"}, inplace=True)
-
-    # Ensure the columns are in the correct order
-    required_columns = [
-        "Employee Name",
-        "Last Clean Desk Date",
-        "Location",
-        "Compliant",
-        "Note",
-        "AI_Response",
-    ]
-    for column in required_columns:
-        if column not in data.columns:
             data[column] = "Unknown" if column in ["Location", "Compliant"] else ""
 
-    # Reorder columns
     data = data[required_columns]
 
     try:
@@ -306,6 +303,7 @@ def process_csv_for_pass_fail_and_generate_pdfs(
         log_to_console(console_output, f"Results saved to {output_path}")
     except Exception as e:
         log_to_console(console_output, f"Error saving the processed file: {e}")
+
 
 
 def run_ai_on_csv(input_csv, start_date, end_date, console_output, generate_pdfs, gemini_endpoint, gemini_model, api_key):
@@ -349,9 +347,16 @@ def run_ai_on_csv(input_csv, start_date, end_date, console_output, generate_pdfs
 
         # Run AI processing on the filtered data
         process_csv_for_pass_fail_and_generate_pdfs(
-            filtered_csv_path, gemini_endpoint, gemini_model, "Note", "output_with_ai.csv",
-            "pdf_reports", console_output, generate_pdfs, api_key
+            csv_path=filtered_csv_path,
+            output_path="output_with_ai.csv",
+            pdf_output_dir="pdf_reports",
+            console_output=console_output,
+            generate_pdfs=generate_pdfs,
+            gemini_model="gemini-1.5-flash",
+            api_key=api_key
         )
+
+
 
     except Exception as e:
         log_to_console(console_output, f"Error: {e}")
